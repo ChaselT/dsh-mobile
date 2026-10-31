@@ -567,6 +567,47 @@ export function apply(ctx) {
       return json(res, 200, { code: publishCode(), expiresInMs: CODE_TTL_MS })
     }
 
+    if (method === 'GET' && path === '/pair/qr') {
+      // 只给本机看：隧道进来时 Host 不是回环
+      const host = String(req.headers.host ?? '').toLowerCase()
+      const local = host === '' || host.startsWith('127.0.0.1') || host.startsWith('localhost')
+        || host.startsWith('[::1]')
+      if (!local) return fail(res, 403, 'forbidden', 'loopback only')
+      const device = authenticate(req)
+      const code = publishCode()
+      // 优先用公网地址：环境变量 > 已配对设备上报的地址 > 本机回环
+      const override = typeof url.searchParams.get('url') === 'string' ? url.searchParams.get('url') : ''
+      const base = override !== '' && override !== null
+        ? override
+        : (process.env.DSH_MOBILE_PUBLIC_URL
+          || (device !== undefined && device.lastBaseUrl !== undefined ? device.lastBaseUrl : '')
+          || ('http://' + (host === '' ? '127.0.0.1' : host)))
+      const uri = `dshmobile://pair?url=${encodeURIComponent(base)}&code=${code}`
+      const qr = 'https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=8&data=' + encodeURIComponent(uri)
+      const html = `<!doctype html><meta charset="utf-8"><title>DSH 遥控器配对</title>
+<body style="font-family:-apple-system,system-ui,sans-serif;background:#f2f3f5;margin:0;padding:40px;text-align:center">
+<h2>用 App 扫这个码</h2>
+<img src="${qr}" width="320" height="320" alt="pairing qr"
+     style="background:#fff;border-radius:16px;padding:12px;box-shadow:0 4px 16px rgba(15,23,42,.12)">
+<p style="color:#61666b;font-size:13px">配对码 <b style="font-size:16px;color:#0f1115">${code}</b>，10 分钟内有效</p>
+<p style="color:#8b9099;font-size:12px;word-break:break-all">${uri}</p></body>`
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+      return res.end(html)
+    }
+
+    if (method === 'GET' && path === '/pair/uri') {
+      const hostKo = String(req.headers.host ?? '').toLowerCase()
+      const localKo = hostKo === '' || hostKo.startsWith('127.0.0.1') || hostKo.startsWith('localhost')
+        || hostKo.startsWith('[::1]')
+      if (!localKo) return fail(res, 403, 'forbidden', 'loopback only')
+      const device = authenticate(req)
+      const code = publishCode()
+      const base = device !== undefined && device.lastBaseUrl !== undefined
+        ? device.lastBaseUrl
+        : 'http://127.0.0.1:8867'
+      return json(res, 200, { uri: `dshmobile://pair?url=${encodeURIComponent(base)}&code=${code}`, code })
+    }
+
     if (method === 'POST' && path === '/pair') {
       let body
       try { body = await readJson(req) } catch (e) { return fail(res, e.status ?? 400, 'bad-request', e.message) }
