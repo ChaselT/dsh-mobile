@@ -1,0 +1,16 @@
+node_modules/
+dist/
+build/
+oh_modules/
+.hvigor/
+.idea/
+.cxx/
+*.hap
+*.hsp
+*.log
+.DS_Store
+
+# 本地环境相关，每台机器路径不同
+apps/harmony/local.properties
+apps/harmony/oh-package-lock.json5
+apps/harmony/entry/.preview/

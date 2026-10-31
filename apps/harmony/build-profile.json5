@@ -1,0 +1,56 @@
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\tangx\\.ohos\\config\\default_dsh_mobile_app_UlKdPczch01WszT-Plm2LWU4XSbv-iiVLuBOgvljuXM=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001B0B38664EDCFB0E1C227F03F2C5971BCC366F6E3438B64C43D6539848A73D129BAAAE87A50E30AE",
+          "profile": "C:\\Users\\tangx\\.ohos\\config\\default_dsh_mobile_app_UlKdPczch01WszT-Plm2LWU4XSbv-iiVLuBOgvljuXM=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\tangx\\.ohos\\config\\default_dsh_mobile_app_UlKdPczch01WszT-Plm2LWU4XSbv-iiVLuBOgvljuXM=.p12",
+          "storePassword": "0000001B26D2E3324663EA2B8EAADF2A08E77385ABF17D6B45D24748F8436176315DA88BAAEFBF2A1F8CEE"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        "targetSdkVersion": "26.0.0",
+        "compatibleSdkVersion": "26.0.0",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug",
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}
