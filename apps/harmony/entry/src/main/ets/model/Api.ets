@@ -126,6 +126,11 @@ export class Api {
     return anonymous.request<PairResult>(http.RequestMethod.POST, '/pair', body)
   }
 
+  /** 拼出可直接给 Image / Video 用的带令牌地址。 */
+  fileUrl(filePath: string): string {
+    return this.base + '/file?path=' + encodeURIComponent(filePath) + '&token=' + encodeURIComponent(this.token)
+  }
+
   async sessions(): Promise<SessionsResult> {
     return this.request<SessionsResult>(http.RequestMethod.GET, '/sessions')
   }

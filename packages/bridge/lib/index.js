@@ -10,12 +10,16 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createServer, request as httpRequest } from 'node:http'
 import { connect as netConnect } from 'node:net'
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, rename, stat } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
 import { homedir, hostname } from 'node:os'
 import { join } from 'node:path'
 
 export const name = 'mobile-bridge'
 export const inject = ['webServer', 'sessionController']
+
+const MEDIA_RE = /[A-Za-z]:\\[^\n\r"'<>|*?]+\.(?:png|jpe?g|gif|webp|bmp|mp4|mov|webm|mkv)\b/gi
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i
 
 const PREFIX = '/mobile/v1'
 const BRIDGE_VERSION = '0.1.0'
@@ -211,6 +215,16 @@ function toItem(event) {
   }
 }
 
+function contentTypeOf(filePath) {
+  const ext = (filePath.split('.').pop() ?? '').toLowerCase()
+  const map = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+    webp: 'image/webp', bmp: 'image/bmp',
+    mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska',
+  }
+  return map[ext] ?? 'application/octet-stream'
+}
+
 function itemsOf(events) {
   const tail = events.slice(-MAX_EVENTS)
   const flat = []
@@ -243,7 +257,31 @@ function itemsOf(events) {
     out.push(item)
   }
   flush()
-  return out
+
+  // 从文本里扒出媒体路径，紧跟引用它的那条消息插入（不能追加到末尾，
+  // 否则所有图片视频都会堆在对话最后面）。
+  const final = []
+  const seenMedia = new Set()
+  for (const item of out) {
+    final.push(item)
+    const text = item.text ?? item.output ?? ''
+    if (typeof text !== 'string' || text === '') continue
+    const found = text.match(MEDIA_RE) ?? []
+    for (const raw of found) {
+      const filePath = raw.trim()
+      if (seenMedia.has(filePath)) continue
+      seenMedia.add(filePath)
+      final.push({
+        seq: item.seq,
+        turn: item.turn,
+        type: 'media',
+        path: filePath,
+        kind: IMAGE_EXT.test(filePath) ? 'image' : 'video',
+        at: item.at,
+      })
+    }
+  }
+  return final
 }
 
 /* ------------------------------ 用量与峰谷 ------------------------------ */
@@ -431,6 +469,7 @@ export function apply(ctx) {
   const APPROVAL_WAIT_MS = 5 * 60 * 1000
   const approvalSamples = []
   const approvals = new Map()
+  let lastApprovalPollAt = 0
   let approvalSeq = 0
   if (typeof ctx.on === 'function') {
     try {
@@ -444,7 +483,10 @@ export function apply(ctx) {
           })
           if (approvalSamples.length > 5) approvalSamples.shift()
         } catch { /* ignore */ }
+        // 手机没配对，或最近 45 秒没来拉审批，就直接让位给桌面；
+        // 否则请求会被扣住最多 5 分钟，看起来像"对话卡住/断开"。
         if (store.devices.size === 0) return next()
+        if (Date.now() - lastApprovalPollAt > 45_000) return next()
         const sessionId = String(request?.agent?.session?.id ?? request?.session?.id ?? '')
         if (sessionId === '') return next()
         const id = `a${++approvalSeq}`
@@ -559,6 +601,14 @@ export function apply(ctx) {
     return code
   }
 
+  const deviceOf = (req, url) => {
+    const auth = req.headers.authorization ?? ''
+    const header = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+    const token = header !== '' ? header : (url.searchParams.get('token') ?? '')
+    if (token === '') return undefined
+    return store.authenticate(token)
+  }
+
   const route = async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://placeholder')
     const path = url.pathname.slice(PREFIX.length) || '/'
@@ -606,7 +656,7 @@ export function apply(ctx) {
       const local = host === '' || host.startsWith('127.0.0.1') || host.startsWith('localhost')
         || host.startsWith('[::1]')
       if (!local) return fail(res, 403, 'forbidden', 'loopback only')
-      const device = authenticate(req)
+      const device = deviceOf(req, url)
       const code = publishCode()
       // 优先用公网地址：环境变量 > 已配对设备上报的地址 > 本机回环
       const override = typeof url.searchParams.get('url') === 'string' ? url.searchParams.get('url') : ''
@@ -634,7 +684,7 @@ export function apply(ctx) {
       const localKo = hostKo === '' || hostKo.startsWith('127.0.0.1') || hostKo.startsWith('localhost')
         || hostKo.startsWith('[::1]')
       if (!localKo) return fail(res, 403, 'forbidden', 'loopback only')
-      const device = authenticate(req)
+      const device = deviceOf(req, url)
       const code = publishCode()
       const base = device !== undefined && device.lastBaseUrl !== undefined
         ? device.lastBaseUrl
@@ -682,6 +732,47 @@ export function apply(ctx) {
       }
     }
 
+    if (method === 'GET' && path === '/file') {
+      const target = url.searchParams.get('path') ?? ''
+      if (target === '') return fail(res, 400, 'bad-request', 'path is required')
+      const lower = target.toLowerCase()
+      const denied = ['c:\\windows', 'c:\\program files', 'c:\\program files (x86)']
+      if (denied.some((d) => lower.startsWith(d))) {
+        return fail(res, 403, 'forbidden', 'system path is not served')
+      }
+      try {
+        const info = await stat(target)
+        if (!info.isFile()) return fail(res, 400, 'bad-request', 'not a file')
+        const type = contentTypeOf(target)
+        const range = req.headers.range
+        if (typeof range === 'string' && range.startsWith('bytes=')) {
+          const [startRaw, endRaw] = range.slice(6).split('-')
+          const start = startRaw === '' ? 0 : Number(startRaw)
+          const end = endRaw === undefined || endRaw === '' ? info.size - 1 : Math.min(Number(endRaw), info.size - 1)
+          if (Number.isNaN(start) || Number.isNaN(end) || start > end) {
+            return fail(res, 416, 'range-not-satisfiable', 'bad range')
+          }
+          res.writeHead(206, {
+            'content-type': type,
+            'content-range': `bytes ${start}-${end}/${info.size}`,
+            'accept-ranges': 'bytes',
+            'content-length': end - start + 1,
+            'cache-control': 'no-store',
+          })
+          return createReadStream(target, { start, end }).pipe(res)
+        }
+        res.writeHead(200, {
+          'content-type': type,
+          'content-length': info.size,
+          'accept-ranges': 'bytes',
+          'cache-control': 'no-store',
+        })
+        return createReadStream(target).pipe(res)
+      } catch (e) {
+        return fail(res, 404, 'not-found', String(e?.message ?? e))
+      }
+    }
+
     if (method === 'POST' && path === '/upload') {
       let body
       try { body = await readJson(req) } catch (e) { return fail(res, e.status ?? 400, 'bad-request', e.message) }
@@ -708,6 +799,7 @@ export function apply(ctx) {
     }
 
     if (method === 'GET' && path === '/approvals') {
+      lastApprovalPollAt = Date.now()
       const items = [...approvals.values()].map((entry) => ({
         id: entry.id,
         sessionId: entry.sessionId,
@@ -880,28 +972,64 @@ export function apply(ctx) {
       if (method === 'GET' && action === '/wait') {
         const afterSeq = Number(url.searchParams.get('afterSeq') ?? '-1')
         const budgetMs = Math.min(30_000, Math.max(1_000, Number(url.searchParams.get('timeout') ?? '25000')))
-        const deadline = Date.now() + budgetMs
-        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), budgetMs)
+        const collected = []
+        let cursor = -1
+        let running = false
+        let sawTurn = false
+        let phase = 'thinking'
         try {
-          while (Date.now() < deadline) {
+          // follow 由宿主推送增量事件，不再反复 inspect 整份日志。
+          for await (const frame of sc.follow({ address: { kind: 'session', sessionId } }, controller.signal)) {
+            const body = frame?.value ?? frame
+            const records = Array.isArray(body?.records) ? body.records : []
+            const events = []
+            for (const record of records) {
+              if (record?.event !== undefined) events.push(record.event)
+              else if (record?.type !== undefined) events.push(record)
+            }
+            for (const event of events) {
+              if (typeof event?.seq === 'number' && event.seq > cursor) cursor = event.seq
+              const item = toItem(event)
+              if (item !== undefined && item.seq > afterSeq) collected.push(item)
+            }
+            if (events.length > 0) {
+              for (const event of events) {
+                if (event?.type === 'turn/start' || event?.type === 'turn/end') sawTurn = true
+              }
+              const state = runStateOf(events)
+              running = state.running
+              if (state.phase !== 'idle') phase = state.phase
+            }
+            if (collected.length > 0) break
+            // 只有明确见到 turn/end 才算这一轮结束；快照里没带回合信息时继续等。
+            if (sawTurn && running === false) break
+          }
+          return json(res, 200, { items: collected, running, phase, cursor })
+        } catch (e) {
+          // 被 timeout 中断属于正常结束
+          if (controller.signal.aborted) {
+            // 没见到 turn/end 就仍视为在跑，让 App 继续挂下一轮；
+            // 见到 turn/end 才真正停下来。
+            return json(res, 200, { items: collected, running: sawTurn ? running : true, phase, cursor })
+          }
+          // follow 不可用时，退回一次性 tail
+          try {
             const snapshot = await sc.inspect(sessionId)
             const events = snapshot?.events ?? []
             const fresh = itemsOf(events).filter((item) => item.seq > afterSeq)
             const state = runStateOf(events)
-            if (fresh.length > 0 || !state.running) {
-              return json(res, 200, {
-                items: fresh,
-                running: state.running,
-                phase: state.phase,
-                cursor: events.at(-1)?.seq ?? -1,
-                settings: settingsOf(events),
-              })
-            }
-            await sleep(400)
+            return json(res, 200, {
+              items: fresh, running: state.running, phase: state.phase,
+              cursor: events.at(-1)?.seq ?? -1, settings: settingsOf(events),
+            })
+          } catch (inner) {
+            return fail(res, 404, 'not-found', String(inner?.message ?? inner))
           }
-          return json(res, 200, { items: [], running: true, phase: 'thinking', cursor: -1 })
-        } catch (e) {
-          return fail(res, 404, 'not-found', String(e?.message ?? e))
+        } finally {
+          clearTimeout(timer)
+          controller.abort()
         }
       }
 

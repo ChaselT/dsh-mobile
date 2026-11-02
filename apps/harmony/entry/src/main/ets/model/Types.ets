@@ -35,6 +35,9 @@ export interface ChatItem {
   title?: string
   output?: string
   files?: DiffFile[]
+  /** media 条目：本地绝对路径与类型 image|video */
+  path?: string
+  kind?: string
   children?: ChatItem[]
   at?: string
 }

@@ -14,6 +14,7 @@ import { common } from '@kit.AbilityKit'
 import picker from '@ohos.file.picker'
 import fs from '@ohos.file.fs'
 import util from '@ohos.util'
+import { scanBarcode, scanCore } from '@kit.ScanKit'
 import {
   AccountInfo, ApprovalItem, BridgeError, ChatItem, DiffFile, HostEntry, ModelCatalog, ModelEffort,
   ModelEntry, ModelGroup, PermissionInfo, PermissionOption, SessionSettings, SessionSummary,
@@ -186,6 +187,56 @@ struct Index {
       return error.code + ': ' + error.message
     }
     return String(error)
+  }
+
+  /** 扫 PC 上的配对二维码，自动填地址和配对码。 */
+  async scanPair(): Promise<void> {
+    try {
+      const context = getContext(this) as common.UIAbilityContext
+      const options: scanBarcode.ScanOptions = {
+        scanTypes: [scanCore.ScanType.ALL],
+        enableMultiMode: true,
+        enableAlbum: true
+      }
+      const result = await scanBarcode.startScanForResult(context, options)
+      const raw = result.originalValue ?? ''
+      if (raw === '') {
+        return
+      }
+      this.applyScanResult(raw)
+    } catch (error) {
+      this.pairError = this.describe(error as Object)
+    }
+  }
+
+  private applyScanResult(raw: string): void {
+    const prefix = 'dshmobile://pair?'
+    if (!raw.startsWith(prefix)) {
+      this.pairError = '这不是配对二维码'
+      return
+    }
+    let url = ''
+    let code = ''
+    const parts = raw.slice(prefix.length).split('&')
+    for (let i = 0; i < parts.length; i++) {
+      const pair = parts[i].split('=')
+      if (pair.length < 2) {
+        continue
+      }
+      if (pair[0] === 'url') {
+        url = decodeURIComponent(pair[1])
+      }
+      if (pair[0] === 'code') {
+        code = decodeURIComponent(pair[1])
+      }
+    }
+    if (url === '' || code === '') {
+      this.pairError = '二维码内容不完整'
+      return
+    }
+    this.serverInput = url
+    this.codeInput = code
+    this.pairError = ''
   }
 
   async pair(): Promise<void> {
@@ -489,6 +540,12 @@ struct Index {
       this.settings = snapshot.settings
       this.screen = 'chat'
       setTimeout((): void => { this.scroller.scrollEdge(Edge.Bottom) }, 60)
+      // 进到一个正在跑的会话，要接着盯增量，否则看不到后续输出
+      if (snapshot.running === true) {
+        this.pending = true
+        this.pendingText = '电脑正在处理…'
+        this.waitSession(session.id)
+      }
     } catch (error) {
       this.notice = this.describe(error as Object)
     } finally {
@@ -855,6 +912,16 @@ struct Index {
             .fontColor('#C62828')
             .width('100%')
         }
+
+        Button('扫码配对')
+          .width('100%')
+          .height(46)
+          .backgroundColor('#F2F3F5')
+          .fontColor(TEXT)
+          .borderRadius(12)
+          .fontSize(15)
+          .margin({ top: 10 })
+          .onClick(() => { this.scanPair() })
 
         Button(this.busy ? '连接中…' : '连接')
           .width('100%')
@@ -2468,6 +2535,35 @@ struct Index {
       }
       .width('100%')
       .alignItems(HorizontalAlign.Start)
+    } else if (item.type === 'media') {
+      Column({ space: 6 }) {
+        if (item.kind === 'image') {
+          Image(this.api().fileUrl(item.path ?? ''))
+            .width('100%')
+            .height(220)
+            .objectFit(ImageFit.Contain)
+            .borderRadius(10)
+            .backgroundColor('#F7F8FA')
+        } else {
+          Video({ src: this.api().fileUrl(item.path ?? '') })
+            .width('100%')
+            .height(210)
+            .borderRadius(10)
+            .controls(true)
+            .objectFit(ImageFit.Contain)
+        }
+        Text((item.path ?? '').split('\\').pop() ?? '')
+          .fontSize(11)
+          .fontColor(TEXT3)
+          .width('100%')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .width('100%')
+      .padding(10)
+      .backgroundColor('#FFFFFF')
+      .border({ width: 1, color: LINE })
+      .borderRadius(12)
     } else if (item.type === 'thought') {
       Column({ space: 6 }) {
         Row({ space: 6 }) {
