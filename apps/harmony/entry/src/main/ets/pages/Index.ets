@@ -37,6 +37,12 @@ const ACCENT_SOFT = '#EEF3FE'
 const PREVIEW_COUNT = 5
 
 /** 列表里混排的一行：工作区分组头或一条会话。 */
+interface ErrorLike {
+  code?: number | string
+  message?: string
+  name?: string
+}
+
 interface GroupRow {
   kind: string
   label: string
@@ -185,6 +191,25 @@ struct Index {
   private describe(error: Object): string {
     if (error instanceof BridgeError) {
       return error.code + ': ' + error.message
+    }
+    if (error instanceof Error) {
+      return error.message
+    }
+    // 系统层错误（如 http 请求失败）是带 code/message 的普通对象，
+    // 直接 String() 只会得到 "[object Object]"。
+    const shaped = error as ErrorLike
+    const message = shaped.message
+    if (message !== undefined && message !== '') {
+      const code = shaped.code
+      return code === undefined ? message : (String(code) + ': ' + message)
+    }
+    try {
+      const json = JSON.stringify(error)
+      if (json !== undefined && json !== '{}') {
+        return json
+      }
+    } catch (e) {
+      // 忽略
     }
     return String(error)
   }
